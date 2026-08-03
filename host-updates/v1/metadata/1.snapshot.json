@@ -1,1 +1,3 @@
-{"signatures":[{"keyid":"3545559c24ee6eb089fb0ad25b17893ce43a67380910a3e648e27636d05fd1fe","sig":"d2d915c85dc3d56008033fb54232c9449c55963062ab98c1dd09a8a5073c472a5fbc0674e3d78252017a7336afededfad3f11191301189bb5a55aece2e9b6904"}],"signed":{"_type":"snapshot","expires":"2026-08-17T16:46:22Z","meta":{"targets.json":{"hashes":{"sha256":"a81ad6d7379f8d5823eab67adc012fe45db14f3cbec0f78f67340b1aab12a9fe"},"length":1111,"version":1}},"spec_version":"1.0.31","version":1}}
+version https://git-lfs.github.com/spec/v1
+oid sha256:e39e4af1093513150a6eacce46139ad6666b368ff84bbfe37fc55779cbd08dbd
+size 468

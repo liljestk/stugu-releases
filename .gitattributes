@@ -1,1 +1,2 @@
+host-updates/v1/metadata/*.json filter=lfs diff=lfs merge=lfs -text
 host-updates/v1/targets/**/*.raucb filter=lfs diff=lfs merge=lfs -text
