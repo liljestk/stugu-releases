@@ -1,0 +1,82 @@
+name: Check TUF freshness
+
+# Secrets-free safety net for the weekly refresher: every day, read the
+# published metadata expiry dates and open (or update) a pinned issue when any
+# role is within 10 days of expiring. Catches a silently dead refresher, a
+# revoked key, and the approach of the offline targets/root ceremonies.
+
+on:
+  schedule:
+    - cron: "43 5 * * *" # daily, 05:43 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Evaluate metadata expiry dates
+        id: expiry
+        run: |
+          python - <<'PY' | tee expiry-report.txt
+          import datetime as dt
+          import json
+          from pathlib import Path
+
+          WARN = dt.timedelta(days=10)
+          now = dt.datetime.now(dt.timezone.utc)
+          directory = Path("host-updates/v1/metadata")
+
+          def signed(name):
+              return json.loads((directory / name).read_text())["signed"]
+
+          timestamp = signed("timestamp.json")
+          snapshot_version = timestamp["meta"]["snapshot.json"]["version"]
+          snapshot = signed(f"{snapshot_version}.snapshot.json")
+          targets_version = snapshot["meta"]["targets.json"]["version"]
+          roles = {
+              "timestamp": timestamp,
+              f"snapshot v{snapshot_version}": snapshot,
+              f"targets v{targets_version}": signed(f"{targets_version}.targets.json"),
+              "root v1": signed("1.root.json"),
+          }
+          stale = []
+          for name, doc in roles.items():
+              expires = dt.datetime.fromisoformat(doc["expires"].replace("Z", "+00:00"))
+              remaining = expires - now
+              state = "EXPIRED" if remaining < dt.timedelta() else f"{remaining.days}d left"
+              print(f"{name}: expires {doc['expires']} ({state})")
+              if remaining < WARN:
+                  stale.append(f"- **{name}** expires `{doc['expires']}` ({state})")
+          Path("stale.md").write_text("\n".join(stale))
+          PY
+          if [ -s stale.md ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open or update the freshness issue
+        if: steps.expiry.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="TUF metadata approaching expiry"
+          body="$(printf 'The following feed trust metadata is within 10 days of expiry or already expired:\n\n%s\n\nShort-lived roles are normally refreshed by the weekly **Refresh TUF metadata** workflow; if they appear here, that workflow or its keys need attention. Targets and root need the offline signing ceremony.\n\n_Automated by check-tuf-freshness._' "$(cat stale.md)")"
+          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+      - name: Turn the run red when stale
+        if: steps.expiry.outputs.stale == 'true'
+        run: |
+          echo "::error::Feed TUF metadata is within 10 days of expiry; see the pinned issue."
+          exit 1

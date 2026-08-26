@@ -1,0 +1,70 @@
+name: Refresh TUF metadata
+
+# Re-signs the two online TUF roles (snapshot +90d, timestamp +30d) so the
+# feed's trust chain never lapses again. Root and targets are offline roles
+# and are never touched here; when the offline ceremony is due within 30 days
+# the refreshed metadata is still pushed but the run turns red (exit 3) so it
+# is impossible to miss.
+#
+# Requires two repository secrets, each a securesystemslib ed25519 private-key
+# JSON document whose keyid the trusted root lists for its role:
+#   STUGU_TUF_SNAPSHOT_KEY
+#   STUGU_TUF_TIMESTAMP_KEY
+# The signer refuses any key the root does not authorize, and refuses to write
+# unless a full python-tuf client update from the trusted root accepts the
+# refreshed chain.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-tuf-metadata
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned signing dependencies
+        run: python -m pip install --quiet "tuf==7.0.0" "securesystemslib[crypto]==1.3.0"
+      - name: Refresh snapshot and timestamp
+        id: refresh
+        env:
+          STUGU_TUF_SNAPSHOT_KEY: ${{ secrets.STUGU_TUF_SNAPSHOT_KEY }}
+          STUGU_TUF_TIMESTAMP_KEY: ${{ secrets.STUGU_TUF_TIMESTAMP_KEY }}
+        run: |
+          set +e
+          python scripts/refresh_tuf_metadata.py 2>&1 | tee refresh-result.txt
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          # Exit 3 means the OFFLINE roles need their ceremony soon; the online
+          # refresh itself may still have produced valid metadata to push.
+          if [ "$status" != "0" ] && [ "$status" != "3" ]; then
+            exit "$status"
+          fi
+      - name: Commit and push refreshed metadata
+        if: steps.refresh.outputs.exit_code == '0' || steps.refresh.outputs.exit_code == '3'
+        run: |
+          git config user.name "stugu-tuf-refresher"
+          git config user.email "stugu-tuf-refresher@users.noreply.github.com"
+          git add host-updates/v1/metadata
+          if git diff --cached --quiet; then
+            echo "no metadata changes to push"
+            exit 0
+          fi
+          git commit -m "Refresh TUF snapshot and timestamp metadata"
+          git push origin HEAD:main
+      - name: Fail visibly when the offline signing ceremony is due
+        if: steps.refresh.outputs.exit_code == '3'
+        run: |
+          echo "::error::TUF targets or root needs the offline signing ceremony (due within 30 days, or already overdue). Any refreshed online metadata was still pushed."
+          exit 3
