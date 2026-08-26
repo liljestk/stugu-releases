@@ -19,6 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # host-updates/v1/metadata/*.json is LFS-tracked; without this the
+          # runner sees pointer files and metadata parsing fails.
+          lfs: true
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
