@@ -126,7 +126,11 @@ def refresh(metadata_dir: Path, snapshot_signer, timestamp_signer,
     snapshot_meta = load(metadata_dir, f"{old_snapshot_version}.snapshot.json")
 
     targets_version = snapshot_meta.signed.meta["targets.json"].version
-    targets_meta = load(metadata_dir, f"{targets_version}.targets.json")
+    # Keep the bytes exactly as published: snapshot pins targets by length and
+    # hash, so re-serializing them fails verification even though the content
+    # is identical.
+    targets_bytes = (metadata_dir / f"{targets_version}.targets.json").read_bytes()
+    targets_meta = Metadata.from_bytes(targets_bytes)
     targets_expires = targets_meta.signed.expires.replace(tzinfo=dt.timezone.utc)
     if targets_expires < now:
         print(
@@ -168,7 +172,7 @@ def refresh(metadata_dir: Path, snapshot_signer, timestamp_signer,
     )
     trusted.update_timestamp(timestamp_bytes)
     trusted.update_snapshot(snapshot_bytes)
-    trusted.update_targets(targets_meta.to_bytes(serializer))
+    trusted.update_targets(targets_bytes)
     print("client verification: trusted root accepted the refreshed chain")
 
     (metadata_dir / f"{new_snapshot.version}.snapshot.json").write_bytes(
@@ -207,12 +211,23 @@ def self_test() -> None:
         targets = Targets(version=4, expires=now + dt.timedelta(days=20))
         targets_meta = Metadata(targets)
         targets_meta.sign(signers["targets"])
-        (metadata_dir / "4.targets.json").write_bytes(
-            targets_meta.to_bytes(serializer)
-        )
+        # Serialize targets compactly, unlike the serializer the refresher
+        # uses. The published repository was written by different tooling, so
+        # re-serializing its targets yields different bytes than the snapshot
+        # pins -- this reproduces that mismatch.
+        targets_bytes = targets_meta.to_bytes(JSONSerializer(compact=True))
+        (metadata_dir / "4.targets.json").write_bytes(targets_bytes)
 
         snapshot = Snapshot(version=9, expires=now - dt.timedelta(days=7))
-        snapshot.meta = {"targets.json": MetaFile(version=4)}
+        # Pin length and hash exactly as the published repository does, so the
+        # self-test catches any re-serialization of the targets bytes.
+        snapshot.meta = {
+            "targets.json": MetaFile(
+                version=4,
+                length=len(targets_bytes),
+                hashes={"sha256": hashlib.sha256(targets_bytes).hexdigest()},
+            )
+        }
         snapshot_meta_obj = Metadata(snapshot)
         snapshot_meta_obj.sign(signers["snapshot"])
         snapshot_bytes = snapshot_meta_obj.to_bytes(serializer)
