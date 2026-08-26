@@ -35,7 +35,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from securesystemslib.signer import CryptoSigner
+from cryptography.hazmat.primitives import serialization
+from securesystemslib.signer import CryptoSigner, SSlibKey
 from tuf.api.metadata import (
     Metadata,
     MetaFile,
@@ -65,17 +66,38 @@ def load(directory: Path, name: str) -> Metadata:
 
 
 def signer_from_env(variable: str, root: Root, role: str) -> CryptoSigner:
+    """Build a signer from a PKCS#8 PEM private key, or a securesystemslib
+    key document, whichever the environment variable holds.
+
+    The signing keys are stored as PEM (``-----BEGIN PRIVATE KEY-----``), so
+    that is the primary path; the JSON form is still accepted because other
+    Stugu tooling emits it. In both cases the public half is derived and its
+    keyid checked against the trusted root before the key is used, so a key
+    belonging to another role can never sign here.
+    """
     raw = os.environ.get(variable)
-    if not raw:
+    if not raw or not raw.strip():
         raise SystemExit(f"{variable} is not set; provide the {role} private key")
-    document = json.loads(raw)
-    allowed = root.roles[role].keyids
-    keyid = document.get("keyid", "")
-    if keyid not in allowed:
+    material = raw.strip()
+
+    if "BEGIN" in material and "PRIVATE KEY" in material:
+        try:
+            private_key = serialization.load_pem_private_key(
+                material.encode("utf-8"), password=None
+            )
+        except (ValueError, TypeError) as error:
+            raise SystemExit(
+                f"{variable} is not a readable unencrypted PEM private key: {error}"
+            ) from error
+        public_key = SSlibKey.from_crypto(private_key.public_key())
+        return CryptoSigner(private_key, public_key)
+
+    try:
+        document = json.loads(material)
+    except json.JSONDecodeError as error:
         raise SystemExit(
-            f"{variable} keyid {keyid[:16]}... is not authorized "
-            f"for role {role} by the trusted root"
-        )
+            f"{variable} is neither a PEM private key nor a key document: {error}"
+        ) from error
     return CryptoSigner.from_securesystemslib_key(document)
 
 
@@ -230,6 +252,38 @@ def self_test() -> None:
             print(f"rogue snapshot signer correctly rejected: {error}")
         else:
             raise AssertionError("rogue signer was not rejected")
+        # The real keys are PKCS#8 PEM files, so prove that path too: a PEM
+        # for the snapshot role must load and produce the same keyid the root
+        # authorizes, and a PEM belonging to another role must be refused.
+        from cryptography.hazmat.primitives import serialization as _serialization
+
+        def _pem_of(signer) -> str:
+            return signer._private_key.private_bytes(  # noqa: SLF001
+                _serialization.Encoding.PEM,
+                _serialization.PrivateFormat.PKCS8,
+                _serialization.NoEncryption(),
+            ).decode("utf-8")
+
+        os.environ["STUGU_SELFTEST_SNAPSHOT_PEM"] = _pem_of(signers["snapshot"])
+        root_signed = load(metadata_dir, "1.root.json").signed
+        pem_signer = signer_from_env(
+            "STUGU_SELFTEST_SNAPSHOT_PEM", root_signed, "snapshot"
+        )
+        assert pem_signer.public_key.keyid == signers["snapshot"].public_key.keyid
+        refresh(metadata_dir, pem_signer, signers["timestamp"], now)
+        print("PEM private key accepted and produced the authorized keyid")
+
+        os.environ["STUGU_SELFTEST_WRONG_PEM"] = _pem_of(signers["targets"])
+        wrong = signer_from_env(
+            "STUGU_SELFTEST_WRONG_PEM", root_signed, "snapshot"
+        )
+        try:
+            refresh(metadata_dir, wrong, signers["timestamp"], now)
+        except SystemExit as error:
+            print(f"wrong-role PEM correctly rejected: {error}")
+        else:
+            raise AssertionError("wrong-role PEM was not rejected")
+
         print("SELF-TEST PASSED")
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
