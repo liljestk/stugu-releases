@@ -1,10 +1,12 @@
 name: Refresh TUF metadata
 
 # Re-signs the two online TUF roles (snapshot +90d, timestamp +30d) so the
-# feed's trust chain never lapses again. Root and targets are offline roles
-# and are never touched here; when the offline ceremony is due within 30 days
-# the refreshed metadata is still pushed but the run turns red (exit 3) so it
-# is impossible to miss.
+# feed's trust chain never lapses again. Root and targets are never touched
+# here: the key-holding operator machine's host-tuf-renewal task renews targets
+# 90 days ahead (source repository, docs/host-update-release.md). Exit 3 turns
+# the run red: either targets is inside 60 days (refreshed metadata was still
+# pushed) or it already expired / root needs its ceremony (nothing was
+# refreshed).
 #
 # Requires two repository secrets, each a securesystemslib ed25519 private-key
 # JSON document whose keyid the trusted root lists for its role:
@@ -67,8 +69,12 @@ jobs:
           fi
           git commit -m "Refresh TUF snapshot and timestamp metadata"
           git push origin HEAD:main
-      - name: Fail visibly when the offline signing ceremony is due
+      - name: Fail visibly when targets or root needs attention
         if: steps.refresh.outputs.exit_code == '3'
         run: |
-          echo "::error::TUF targets or root needs the offline signing ceremony (due within 30 days, or already overdue). Any refreshed online metadata was still pushed."
+          if grep -q '^REFUSING:' refresh-result.txt; then
+            echo "::error::Nothing was refreshed. $(grep '^REFUSING:' refresh-result.txt)"
+          else
+            echo "::error::Snapshot and timestamp were refreshed and pushed, but targets expires within 60 days and was not renewed on schedule. Run npm run host-tuf-renewal -- status (and -- run) on the key-holding operator machine."
+          fi
           exit 3
