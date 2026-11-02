@@ -2,11 +2,13 @@
 """Refresh the short-lived TUF roles (snapshot, timestamp) of the Stugu feed.
 
 Snapshot and timestamp are TUF's designated online roles; root and targets
-remain offline-signed and are never modified here. The refresher:
+are signed off GitHub and never modified here. Targets is renewed by the
+host-tuf-renewal task on the key-holding operator machine (source repository,
+docs/host-update-release.md), 90 days before it expires. The refresher:
 
   1. loads the trusted root and the current metadata set;
-  2. refuses to run if root or targets themselves need the offline ceremony,
-     since refreshing the online roles cannot help then;
+  2. refuses to run if root needs its offline ceremony or targets has already
+     expired, since refreshing the online roles cannot help then;
   3. bumps snapshot (+90 days) and timestamp (+30 days) by exactly one
      version each, preserving the snapshot hash/length pins in timestamp;
   4. signs with keys supplied via environment variables, refusing any key
@@ -53,7 +55,14 @@ from tuf.ngclient._internal.trusted_metadata_set import TrustedMetadataSet
 
 SNAPSHOT_LIFETIME = dt.timedelta(days=90)
 TIMESTAMP_LIFETIME = dt.timedelta(days=30)
-OFFLINE_CEREMONY_WARNING = dt.timedelta(days=30)
+ROOT_CEREMONY_WARNING = dt.timedelta(days=30)
+# The operator machine renews targets 90 days ahead, so 60 days left means its
+# daily task has missed a month of runs.
+TARGETS_RENEWAL_WARNING = dt.timedelta(days=60)
+RENEW_TARGETS_HINT = (
+    "run `npm run host-tuf-renewal -- status` (and `-- run`) on the "
+    "key-holding operator machine"
+)
 EXIT_OFFLINE_CEREMONY_NEEDED = 3
 
 
@@ -117,7 +126,7 @@ def refresh(metadata_dir: Path, snapshot_signer, timestamp_signer,
     verify_signer_for_role(root, "snapshot", snapshot_signer)
     verify_signer_for_role(root, "timestamp", timestamp_signer)
     root_expires = root.expires.replace(tzinfo=dt.timezone.utc)
-    if root_expires < now + OFFLINE_CEREMONY_WARNING:
+    if root_expires < now + ROOT_CEREMONY_WARNING:
         print(f"REFUSING: root expires {root_expires}; offline ceremony required")
         raise SystemExit(EXIT_OFFLINE_CEREMONY_NEEDED)
 
@@ -135,10 +144,10 @@ def refresh(metadata_dir: Path, snapshot_signer, timestamp_signer,
     if targets_expires < now:
         print(
             f"REFUSING: targets v{targets_version} expired {targets_expires}; "
-            "offline ceremony required"
+            f"nothing was refreshed. Renew targets first: {RENEW_TARGETS_HINT}"
         )
         raise SystemExit(EXIT_OFFLINE_CEREMONY_NEEDED)
-    targets_ceremony_soon = targets_expires < now + OFFLINE_CEREMONY_WARNING
+    targets_ceremony_soon = targets_expires < now + TARGETS_RENEWAL_WARNING
 
     # Bump snapshot by exactly one version with a fresh lifetime.
     new_snapshot: Snapshot = snapshot_meta.signed
@@ -323,8 +332,8 @@ def main() -> None:
     print(json.dumps(result, indent=2))
     if result["targets_ceremony_soon"]:
         print(
-            f"WARNING: targets expires {result['targets_expires']}; "
-            "schedule the offline targets ceremony",
+            f"WARNING: targets expires {result['targets_expires']} and was not "
+            f"renewed on schedule; {RENEW_TARGETS_HINT}",
             file=sys.stderr,
         )
         raise SystemExit(EXIT_OFFLINE_CEREMONY_NEEDED)
