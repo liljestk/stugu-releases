@@ -33,10 +33,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # host-updates/v1/metadata/*.json is LFS-tracked; without this the
-          # runner sees pointer files and metadata parsing fails.
-          lfs: true
+      - name: Fetch LFS metadata only
+        # host-updates/v1/metadata/*.json is LFS-tracked; without it the runner
+        # sees pointer files and metadata parsing fails. `lfs: true` would also
+        # download every ~430 MB host bundle, and each download counts against
+        # the account's LFS bandwidth, so pull the metadata alone. The local
+        # install also keeps `git add` storing refreshed metadata as LFS objects.
+        run: |
+          git lfs install --local
+          git lfs pull --include "host-updates/v1/metadata/*"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
